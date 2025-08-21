@@ -1,5 +1,3 @@
-#Used to be able to predict maps to be played for two teams beforehand. Thus making me able to exploit wrongfully priced odds
-
 map_names = ["Dust2", "Mirage", "Inferno", "Nuke", "Train", "Ancient", "Anubis"]
 
 def get_pick_ban_data(team_a: str, team_b: str):
