@@ -1,0 +1,117 @@
+#Script to generate a data for a stat card for a League of Legends player based on historical performance in ELOL log.
+#Inspired by https://x.com/JFreshHockey, sample of a vizualization of this script: https://x.com/ELOLCOM/status/1911373920663380139
+
+import pandas as pd
+import os
+
+csv_path = ''
+output_dir = ''
+
+df = pd.read_csv('your_input_file.csv')
+df['playername'] = df['playername'].astype(str)
+df['playername_lower'] = df['playername'].str.lower()
+df['position'] = df['position'].str.lower()
+df['league'] = df['league'].str.upper()
+df['date'] = pd.to_datetime(df['date'], errors='coerce')
+df['patch'] = df['patch'].astype(str)
+
+player_input = input("Player name: ").strip().lower()
+season_input = input("Season: ").strip()
+
+leagues = ['LCK']
+
+df_filtered = df[
+    (df['league'].isin(leagues)) &
+    (df['patch'].str.startswith(f"{season_input}."))
+].copy()
+
+if df_filtered.empty:
+    print(f"No games found for Season {season_input} in the selected leagues.")
+    exit()
+
+player_data = df_filtered[df_filtered['playername_lower'] == player_input].copy()
+if player_data.empty:
+    print("Player not found in eligible leagues/patch window.")
+    exit()
+
+player_latest = player_data.sort_values(by=['date', 'game']).iloc[-1]
+player_name = player_latest['playername']
+player_position = player_latest['position']
+player_league = player_latest['league']
+
+role_df = df_filtered[df_filtered['position'] == player_position].copy()
+
+role_df['GSPM'] = role_df['game_score'] / role_df['gamelength']
+role_df['LSPM'] = role_df['lane_score'] / 15
+role_df['PSPM'] = role_df['GSPM'] + role_df['LSPM']
+role_df['KPM'] = role_df['kills'] / role_df['gamelength']
+role_df['APM'] = role_df['assists'] / role_df['gamelength']
+
+avg_stats = role_df.groupby('playername_lower').agg({
+    'GSPM': 'mean',
+    'LSPM': 'mean',
+    'PSPM': 'mean',
+    'KPM': 'mean',
+    'APM': 'mean'
+})
+
+if player_input not in avg_stats.index:
+    print("No stats available for this player in the filtered data.")
+    exit()
+
+player_avg = avg_stats.loc[player_input]
+
+def percentile(series, value):
+    return (series < value).mean() * 100
+
+def rank(series, value):
+    return series.sort_values(ascending=False).reset_index(drop=True).tolist().index(value) + 1
+
+stats = {
+    'GSPM (Game Score/Min)': ('GSPM', player_avg['GSPM']),
+    'LSPM (Lane Score/15min)': ('LSPM', player_avg['LSPM']),
+    'PSPM (Perf. Score/Min)': ('PSPM', player_avg['PSPM']),
+    'KPM (Kills/Min)': ('KPM', player_avg['KPM']),
+    'APM (Assists/Min)': ('APM', player_avg['APM']),
+}
+
+elo_latest = role_df.sort_values(by=['playername_lower', 'date', 'game']).groupby('playername_lower').tail(1)
+player_elo = player_latest['new_elo']
+elo_series = elo_latest.set_index('playername_lower')['new_elo']
+elo_percentile = percentile(elo_series, player_elo)
+elo_rank = rank(elo_series, player_elo)
+
+player_data['performance_score'] = player_data['game_score'] + player_data['lane_score']
+top_performances = player_data.sort_values(by='performance_score', ascending=False).head(3)
+
+output_lines = []
+output_lines.append(f"Stat Card for {player_name} ({player_position.upper()}) in {player_league}")
+output_lines.append(f"Timeframe: Season {season_input}")
+output_lines.append(f"Leagues: {', '.join(leagues)}")
+output_lines.append("-------------------------------------------------\n")
+
+for label, (col, val) in stats.items():
+    series = avg_stats[col]
+    perc = percentile(series, val)
+    rnk = rank(series, val)
+    output_lines.append(f"{label:28s}: {val:.3f} → {perc:.2f} percentile ({rnk}th place)")
+
+output_lines.append(f"\nCurrent Elo: {player_elo:.2f} → {elo_percentile:.2f} percentile ({elo_rank}th place)")
+
+output_lines.append(f"\nTop 3 Performance Matches (score = game_score + lane_score):")
+for _, row in top_performances.iterrows():
+    date = row['date'].date()
+    score = row['performance_score']
+    opponent = row['opponent_team']
+    gameid = row['gameid']
+    output_lines.append(f"{score:.2f} - {date} vs {opponent}, GameID: {gameid}")
+
+if not os.path.exists('output_cards'):
+    os.makedirs('output_cards')
+
+file_path = os.path.join('output_cards', f"{player_input}_S{season_input}_card.txt")
+with open(file_path, "w", encoding="utf-8") as f:
+    f.write("\n".join(output_lines))
+
+print("\n".join(output_lines))
+print(f"\nSaved to {file_path}")
