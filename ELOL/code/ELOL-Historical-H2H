@@ -1,0 +1,109 @@
+#This script was developed to calculate historical head 2 head win rates between two teams using the ELOL model. In testing, the model achieved an approximate net positive return of 10%.
+
+import pandas as pd
+
+csv_path = ''
+df = pd.read_csv(csv_path)
+
+df['playername'] = df['playername'].astype(str).str.strip()
+df['playername_lower'] = df['playername'].str.lower()
+df['league'] = df['league'].astype(str).str.upper()
+df['match_outcome'] = df['match_outcome'].str.lower()
+df['game'] = pd.to_numeric(df['game'], errors='coerce')
+
+df['date_clean'] = df['date'].astype(str).str.strip().str.split(' ').str[0]
+df['date_clean'] = pd.to_datetime(df['date_clean'], format='%Y-%m-%d', errors='coerce')
+
+df = df.dropna(subset=['date_clean'])
+
+roles = ['Top', 'Jungle', 'Mid', 'Bot', 'Support']
+team1 = {}
+team2 = {}
+
+print("Team 1 players:")
+for role in roles:
+    team1[role] = input(f"{role} Team 1: ").strip().lower()
+
+print("Team 2 players:")
+for role in roles:
+    team2[role] = input(f"{role} Team 2: ").strip().lower()
+
+league_input = input("Enter League: ").strip().upper()
+
+def get_latest_elo(player_name):
+    player_df = df[df['playername_lower'] == player_name].copy()
+    if player_df.empty:
+        print(f"{player_name} | Not found, defaulting to 1500")
+        return 1500
+
+    latest_date = player_df['date_clean'].max()
+    recent = player_df[player_df['date_clean'] == latest_date]
+
+    if recent.empty or recent['game'].isnull().all():
+        print(f"{player_name} | No valid recent game, defaulting to 1500")
+        return 1500
+
+    recent = recent.sort_values(by='game', ascending=False)
+    try:
+        row = recent.iloc[0]
+        return row['new_elo']
+    except IndexError:
+        print(f"{player_name} | Error fetching recent Elo, defaulting to 1500")
+        return 1500
+
+team1_elo = sum(get_latest_elo(name) for name in team1.values())
+team2_elo = sum(get_latest_elo(name) for name in team2.values())
+
+print("Team Elo Summary:")
+print(f"Team 1: {', '.join(team1.values())} [{team1_elo:.2f}]")
+print(f"Team 2: {', '.join(team2.values())} [{team2_elo:.2f}]")
+
+elo_diff = abs(team1_elo - team2_elo)
+higher_team = 'Team 1' if team1_elo > team2_elo else 'Team 2'
+
+league_df = df[df['league'] == league_input].copy()
+
+team_matches = league_df.groupby(['gameid', 'team']).agg({
+    'team_old_elo': 'mean',
+    'match_outcome': 'first'
+}).reset_index()
+
+valid_gameids = team_matches['gameid'].value_counts()
+valid_gameids = valid_gameids[valid_gameids == 2].index
+matchups = team_matches[team_matches['gameid'].isin(valid_gameids)]
+
+results = []
+for gameid, group in matchups.groupby('gameid'):
+    if len(group) != 2:
+        continue
+    team1_row, team2_row = group.iloc[0], group.iloc[1]
+
+    if team1_row['team_old_elo'] == team2_row['team_old_elo']:
+        continue
+
+    higher, lower = (team1_row, team2_row) if team1_row['team_old_elo'] > team2_row['team_old_elo'] else (team2_row, team1_row)
+    diff = abs(higher['team_old_elo'] - lower['team_old_elo'])
+    win = 1 if higher['match_outcome'] == 'win' else 0
+    results.append({'elo_diff': diff, 'higher_won': win})
+
+history_df = pd.DataFrame(results)
+window = 25
+lower_bound = elo_diff - window
+upper_bound = elo_diff + window
+similar = history_df[(history_df['elo_diff'] >= lower_bound) & (history_df['elo_diff'] <= upper_bound)]
+
+print("Match Prediction:")
+if similar.empty:
+    print(No historical matchups with similar Elo difference.")
+else:
+    winrate = similar['higher_won'].mean()
+    print(Based on {len(similar)} historical matches for league {league_input}:")
+    if team1_elo == team2_elo:
+        print("→ Estimated chance Team 1 wins: 50.00%")
+        print("→ Estimated chance Team 2 wins: 50.00%")
+    elif higher_team == 'Team 1':
+        print(f"→ Estimated chance Team 1 ({', '.join(team1.values())}) wins: {winrate:.2%} [{team1_elo:.0f}]")
+        print(f"→ Estimated chance Team 2 ({', '.join(team2.values())}) wins: {(1 - winrate):.2%} [{team2_elo:.0f}]")
+    else:
+        print(f"→ Estimated chance Team 2 ({', '.join(team2.values())}) wins: {winrate:.2%} [{team2_elo:.0f}]")
+        print(f"→ Estimated chance Team 1 ({', '.join(team1.values())}) wins: {(1 - winrate):.2%} [{team1_elo:.0f}]")
