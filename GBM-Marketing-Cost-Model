@@ -1,0 +1,74 @@
+# Early model for my marketing cost predictor model, done as a part of my final thesis.
+
+import pandas as pd
+from sklearn.model_selection import train_test_split
+from sklearn.ensemble import GradientBoostingRegressor
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
+from sklearn.impute import SimpleImputer
+
+def load_and_preprocess(forecast_path, results_path):
+    forecast = pd.read_csv(forecast_path)
+    results = pd.read_csv(results_path)
+
+    data = pd.merge(forecast, results[['Keyword', 'Kostnad']], on='Keyword', how='left')
+    data['Kostnad'] = pd.to_numeric(data['Kostnad'].str.replace(',', '.').str.replace(' ', ''), errors='coerce')
+    data['Kostnad'] = data['Kostnad'].fillna(0)
+    
+    percentage_cols = ['Three month change', 'YoY change']
+    for col in percentage_cols:
+        data[col] = pd.to_numeric(data[col].str.replace('%', '').astype(float), errors='coerce')
+
+    numeric_cols = ['Low AVG Search', 'High AVG Search'] + percentage_cols
+    for col in numeric_cols:
+        data[col] = data[col].fillna(data[col].median())
+    data['Top of page bid (low range)'] = data['Top of page bid (low range)'].fillna(data['Top of page bid (low range)'].median())
+    data['Top of page bid (high range)'] = data['Top of page bid (high range)'].fillna(data['Top of page bid (high range)'].median())
+    data['Competition'] = data['Competition'].fillna(data['Competition'].mode()[0])
+
+    return data
+
+def prepare_data(paths):
+    all_data = pd.DataFrame()
+    for forecast_path, results_path in paths:
+        processed_data = load_and_preprocess(forecast_path, results_path)
+        all_data = pd.concat([all_data, processed_data], ignore_index=True)
+    return all_data
+
+def train_model(X, y):
+    pipeline = Pipeline([
+        ('imputer', SimpleImputer(strategy='constant', fill_value=0)),
+        ('scaler', StandardScaler()),
+        ('gbm', GradientBoostingRegressor(n_estimators=100, learning_rate=0.1, max_depth=3, random_state=42))
+    ])
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+    pipeline.fit(X_train, y_train)
+    return pipeline
+
+def preprocess_test_data(test_data):
+    percentage_cols = ['Three month change', 'YoY change']
+    for col in percentage_cols:
+        test_data[col] = pd.to_numeric(test_data[col].str.replace('%', '').astype(float), errors='coerce')
+    return test_data
+
+def predict_cost(model, new_data):
+    new_data = preprocess_test_data(new_data)
+    predictions = model.predict(new_data)
+    predictions = [max(0, x) for x in predictions]
+    return predictions
+
+paths = [
+]
+
+data = prepare_data(paths)
+features = data[['Low AVG Search', 'High AVG Search', 'Three month change', 'YoY change', 'Top of page bid (low range)', 'Top of page bid (high range)']]
+target = data['Kostnad']
+model = train_model(features, target)
+
+test_data_path = 
+test_data = pd.read_csv(test_data_path)
+predicted_costs = predict_cost(model, test_data[['Low AVG Search', 'High AVG Search', 'Three month change', 'YoY change', 'Top of page bid (low range)', 'Top of page bid (high range)']])
+test_data['Kostnad'] = predicted_costs
+
+output_path = 
+test_data.to_csv(output_path, index=False)
