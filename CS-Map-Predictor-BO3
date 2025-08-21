@@ -1,0 +1,89 @@
+#A variation of my first CS-Map-predictor script, where I implemented a logic for when a match was played BO3. Used to exploit odds pricings.
+
+map_names = ["Dust2", "Mirage", "Inferno", "Nuke", "Train", "Ancient", "Anubis"]
+
+def get_pick_ban_data(team_a: str, team_b: str):
+    print("Pick percentages first for each map:")
+    picks_a = {}
+    picks_b = {}
+    for map_name in map_names:
+        picks_a[map_name] = int(input(f"{team_a} {map_name} pick %: ").replace('%', '').strip())
+        picks_b[map_name] = int(input(f"{team_b} {map_name} pick %: ").replace('%', '').strip())
+
+    print("Enter ban percentages for each map:")
+    bans_a = {}
+    bans_b = {}
+    for map_name in map_names:
+        bans_a[map_name] = int(input(f"{team_a} {map_name} ban %: ").replace('%', '').strip())
+        bans_b[map_name] = int(input(f"{team_b} {map_name} ban %: ").replace('%', '').strip())
+
+    return picks_a, bans_a, picks_b, bans_b
+
+def simulate_bo3(team_a: str, team_b: str, pa, ba, pb, bb):
+    all_maps = set(map_names)
+    log = []
+
+    def ban_highest(team_name, ban_data):
+        sorted_bans = sorted([(m, pct) for m, pct in ban_data.items() if m in all_maps], key=lambda x: -x[1])
+        for map_, _ in sorted_bans:
+            log.append(f"{len(log)+1}. {team_name} removed {map_}")
+            all_maps.remove(map_)
+            return map_
+        return None
+
+    def pick_highest(team_name, pick_data):
+        sorted_picks = sorted([(m, pct) for m, pct in pick_data.items() if m in all_maps], key=lambda x: -x[1])
+        for map_, _ in sorted_picks:
+            log.append(f"{len(log)+1}. {team_name} picked {map_}")
+            all_maps.remove(map_)
+            return map_
+        return None
+
+    def final_ban_decision():
+        top_b_ban = max([(m, bb[m]) for m in all_maps], key=lambda x: x[1])
+        top_a_pick = max([(m, pa[m]) for m in all_maps], key=lambda x: x[1])
+        if top_b_ban[1] >= top_a_pick[1]:
+            map_ = top_b_ban[0]
+        else:
+            map_ = top_a_pick[0]
+        log.append(f"{len(log)+1}. {team_b} removed {map_}")
+        all_maps.remove(map_)
+
+    def final_pick(team_name, pick_data):
+        sorted_picks = sorted([(m, pct) for m, pct in pick_data.items() if m in all_maps], key=lambda x: -x[1])
+        if sorted_picks:
+            map_ = sorted_picks[0][0]
+            log.append(f"{len(log)+1}. {team_name} picked {map_}")
+            all_maps.remove(map_)
+
+    ban_highest(team_a, ba)
+    ban_highest(team_b, bb)
+
+    pick_highest(team_a, pa)
+    pick_highest(team_b, pb)
+
+    final_ban_decision()
+
+    final_pick(team_a, pa)
+
+    if all_maps:
+        final_map = next(iter(all_maps))
+        log.append(f"{len(log)+1}. {final_map} was left over")
+
+    return log
+
+def main():
+    print("Bo3 Map Veto Simulation")
+
+    team_a = input("Enter name of Team A: ").strip()
+    team_b = input("Enter name of Team B: ").strip()
+
+    picks_a, bans_a, picks_b, bans_b = get_pick_ban_data(team_a, team_b)
+    result = simulate_bo3(team_a, team_b, picks_a, bans_a, picks_b, bans_b)
+
+    print("Veto Order:")
+    for line in result:
+        print(line)
+
+if __name__ == "__main__":
+    main()
