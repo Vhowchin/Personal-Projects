@@ -1,0 +1,90 @@
+#Scrapped PoC for total rounds markets.
+
+import numpy as np
+
+def rescale_win_rates(a_rate, b_rate):
+    # Rescale win rates so they sum to 100%
+    rescaled_a = (a_rate + (1 - b_rate)) / 2
+    rescaled_b = (b_rate + (1 - a_rate)) / 2
+    return rescaled_a, rescaled_b
+
+def simulate_game(a_t_rate, a_ct_rate, b_t_rate, b_ct_rate, a_starting_side, num_simulations=10000):
+    results = {}
+    
+    #Rescale the win rates
+    a_t, b_ct = rescale_win_rates(a_t_rate, b_ct_rate)
+    b_t, a_ct = rescale_win_rates(b_t_rate, a_ct_rate)
+    
+    for _ in range(num_simulations):
+        a_wins = 0
+        b_wins = 0
+        
+        # etermine the starting side for Team A
+        if a_starting_side == 'CT':
+            first_half_a_rate = a_ct
+            first_half_b_rate = b_t
+            second_half_a_rate = a_t
+            second_half_b_rate = b_ct
+        else:
+            first_half_a_rate = a_t
+            first_half_b_rate = b_ct
+            second_half_a_rate = a_ct
+            second_half_b_rate = b_t
+        
+        #Simulate the first 12 rounds
+        for _ in range(12):
+            if np.random.rand() < first_half_a_rate:
+                a_wins += 1
+            else:
+                b_wins += 1
+            
+            if a_wins == 13 or b_wins == 13:
+                break
+        
+        #Simulate the second half if no team has won yet
+        if a_wins < 13 and b_wins < 13:
+            for _ in range(12):
+                if np.random.rand() < second_half_a_rate:
+                    a_wins += 1
+                else:
+                    b_wins += 1
+
+                if a_wins == 13 or b_wins == 13:
+                    break
+        
+        #Record the total rounds played
+        total_rounds = a_wins + b_wins
+        if total_rounds not in results:
+            results[total_rounds] = 0
+        results[total_rounds] += 1
+    
+    #Calculate the percentage for each total rounds played
+    for rounds in results:
+        results[rounds] = (results[rounds] / num_simulations) * 100
+    
+    #Sort results by the number of rounds played
+    sorted_results = sorted(results.items(), key=lambda x: x[0])
+    
+    #Calculate cumulative probabilities
+    cumulative_under = 0
+    cumulative_over = 100
+    
+    print("Rounds | Probability Under | Probability Over")
+    print("--------------------------------------------")
+    for rounds, percentage in sorted_results:
+        rounds_decimal = rounds - 0.5
+        
+        print(f"{rounds_decimal:.1f}    | {cumulative_under:.2f}%           | {cumulative_over:.2f}%")
+        
+        cumulative_under += percentage
+        cumulative_over -= percentage
+
+#User inputs
+team_a_t_win_rate = float(input("Enter Team A T win rate (as a percentage, e.g., 65 for 65%): ")) / 100
+team_a_ct_win_rate = float(input("Enter Team A CT win rate (as a percentage, e.g., 55 for 55%): ")) / 100
+team_b_t_win_rate = float(input("Enter Team B T win rate (as a percentage, e.g., 35 for 35%): ")) / 100
+team_b_ct_win_rate = float(input("Enter Team B CT win rate (as a percentage, e.g., 45 for 45%): ")) / 100
+team_a_starting_side = input("Enter Team A starting side ('CT' or 'T'): ")
+
+#Simulation
+simulate_game(team_a_t_win_rate, team_a_ct_win_rate, team_b_t_win_rate, team_b_ct_win_rate, team_a_starting_side)
