@@ -1,5 +1,3 @@
-#A variation of my first CS-Map-predictor script, where I implemented a logic for when a match was played BO3. Used to exploit odds pricings.
-
 map_names = ["Dust2", "Mirage", "Inferno", "Nuke", "Train", "Ancient", "Anubis"]
 
 def get_pick_ban_data(team_a: str, team_b: str):
