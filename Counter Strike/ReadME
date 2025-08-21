@@ -1,4 +1,4 @@
 "Map Predictor" scripts used to be able to predict maps to be played for two teams beforehand.
 One file used for Best of 1 matchup logic, and one being used for Best of 3 logic.
 
-This making me able to exploit wrongfully priced odds for the first half of matches, via the calculations from "First-Half-Probabilities".
+Thus making me able to exploit wrongfully priced odds for the first half of matches, via the calculations from "First-Half-Probabilities".
