@@ -1,0 +1,97 @@
+#This was a PoC (Proof of Concept) project, so the loading of weighted data was done by hand in Excel.
+
+import numpy as np
+n_simulations = 100000
+
+#Paste zone for statistics from excel(Decimal form for each team)
+team_a_round_win = 0.55
+team_a_pistol_win = 0.676770833333333
+team_a_second_round_conversion = 0.945652173913044
+team_a_second_round_break = 0.148833333333333
+
+team_b_round_win = 0.45
+team_b_pistol_win = 0.323229166666667
+team_b_second_round_conversion = 0.851166666666667
+team_b_second_round_break = 0.0543478260869565
+#Paste zone for statistics from google sheets (Decimal form for each team)
+
+#Reinitializing the counts for each scenario
+team_a_wins_3_first = 0
+team_a_wins_6_first = 0
+team_a_wins_7 = 0
+team_b_wins_3_first = 0
+team_b_wins_6_first = 0
+team_b_wins_7 = 0
+ties_6_6 = 0
+
+#Simulation loop
+for _ in range(n_simulations):
+    team_a_score, team_b_score = 0, 0
+    first_to_3_done = False
+    first_to_6_done = False
+
+    for round in range(1, 13):
+        #Round outcomes based on probabilities
+        if round == 1:  #Pistol round
+            if np.random.rand() < team_a_pistol_win:
+                team_a_score += 1
+            else:
+                team_b_score += 1
+        elif round == 2:  #Second round, applying correct logic based on pistol round outcome
+            if team_a_score > team_b_score:  #Team A won pistol
+                if np.random.rand() < team_a_second_round_conversion:
+                    team_a_score += 1
+                else:
+                    team_b_score += 1
+            elif team_b_score > team_a_score:  #Team B won pistol
+                if np.random.rand() < team_b_second_round_conversion:
+                    team_b_score += 1
+                else:
+                    team_a_score += 1
+        else:  #Other rounds
+            if np.random.rand() < team_a_round_win:
+                team_a_score += 1
+            else:
+                team_b_score += 1
+
+        #Check and mark the first team to win 3 rounds
+        if not first_to_3_done and (team_a_score >= 3 or team_b_score >= 3):
+            if team_a_score >= 3:
+                team_a_wins_3_first += 1
+            else:
+                team_b_wins_3_first += 1
+            first_to_3_done = True
+
+        #Check and mark the first team to win 6 rounds
+        if not first_to_6_done and (team_a_score >= 6 or team_b_score >= 6):
+            if team_a_score >= 6:
+                team_a_wins_6_first += 1
+            else:
+                team_b_wins_6_first += 1
+            first_to_6_done = True
+
+    #Final outcomes after all rounds or reaching 7 wins
+    if team_a_score >= 7:
+        team_a_wins_7 += 1
+    elif team_b_score >= 7:
+        team_b_wins_7 += 1
+    elif team_a_score == 6 and team_b_score == 6:
+        ties_6_6 += 1
+
+prob_team_a_wins_3_first = (team_a_wins_3_first / n_simulations) * 100
+prob_team_a_wins_6_first = (team_a_wins_6_first / n_simulations) * 100
+prob_team_a_wins_7 = (team_a_wins_7 / n_simulations) * 100
+prob_team_b_wins_3_first = (team_b_wins_3_first / n_simulations) * 100
+prob_team_b_wins_6_first = (team_b_wins_6_first / n_simulations) * 100
+prob_team_b_wins_7 = (team_b_wins_7 / n_simulations) * 100
+prob_ties_6_6 = (ties_6_6 / n_simulations) * 100
+
+print ("Team a first to 3:", prob_team_a_wins_3_first,"%")
+print ("Team a first to 6:", prob_team_a_wins_6_first,"%")
+print ("Team a win first half:", (prob_team_a_wins_7/(prob_team_a_wins_7+prob_team_b_wins_7))*100,"%")
+print ("")
+print ("Team b first to 3:", prob_team_b_wins_3_first,"%")
+print ("Team b first to 6:", prob_team_b_wins_6_first,"%")
+print ("Team win first half:", (prob_team_b_wins_7/(prob_team_a_wins_7+prob_team_b_wins_7))*100,"%")
+
+
