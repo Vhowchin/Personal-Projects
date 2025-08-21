@@ -1,0 +1,310 @@
+#Early version of my own calculated elo system for professional League of Legends players (https://x.com/ELOLCOM). Done as a passion project, to train and test my coding skills. 
+#As this being a bigger project than others on my git, I've decided to include comments in this file.
+
+import pandas as pd
+from tqdm import tqdm
+import math
+import csv
+import os
+
+#SETTINGS
+BASE_ELO = 1500
+K = 36
+MIN_ELO_CHANGE = 2
+
+#FILE PATHS
+RAW_DATA_PATH = ''
+ELO_LOG_PATH = ''
+
+#ELO STORAGE
+player_position_elo = {}  # (playerid, position) -> elo
+player_champion_elo = {}  # (playerid, champion) -> elo
+elo_history = []
+
+#Load previous log, to skip gameID's already existing, done to save computing time
+if os.path.exists(ELO_LOG_PATH):
+    log_df = pd.read_csv(ELO_LOG_PATH, parse_dates=['date'])
+    processed_games = set(zip(log_df['gameid'], log_df['game']))
+
+    #Rebuilds Elo state from last known values
+    last_entries = log_df.sort_values(['date', 'game']).drop_duplicates(['playerid', 'position'], keep='last')
+    for _, row in last_entries.iterrows():
+        player_position_elo[(row['playerid'], row['position'])] = row['new_elo']
+
+    last_champs = log_df.sort_values(['date', 'game']).drop_duplicates(['playerid', 'champion'], keep='last')
+    for _, row in last_champs.iterrows():
+        player_champion_elo[(row['playerid'], row['champion'])] = row['new_champion_elo']
+else:
+    log_df = pd.DataFrame()
+    processed_games = set()
+
+#Loads new data
+df = pd.read_csv(RAW_DATA_PATH, low_memory=False)
+
+#Filters already known gameid's
+df['date'] = pd.to_datetime(df['date'], errors='coerce')
+df = df[df[['gameid', 'game']].apply(tuple, axis=1).isin(processed_games) == False]
+
+#Cleaning
+required_cols = [
+    'playerid', 'playername', 'position', 'teamname', 'gameid', 'game', 'league', 'result',
+    'kills', 'assists', 'dpm', 'vspm', 'goldat15', 'xpat15', 'cspm', 'earned gpm',
+    'killsat15', 'assistsat15', 'deathsat15', 'deathsat10', 'monsterkillsenemyjungle', 'firstherald',
+    'barons', 'dragons', 'heralds', 'void_grubs', 'firstdragon',
+    'teamkills', 'teamdeaths', 'date', 'champion'
+]
+#Only standard roles for lane-opponent mapping, this doesn't account for laneswaps, but the logic remains the same
+df = df[required_cols].dropna(subset=['playerid', 'teamname', 'playername', 'position'])
+df = df[df['position'].isin(['top', 'jng', 'mid', 'bot', 'sup'])]
+
+#Force numerics for stat fields (bad/missing -> 0), usually for games pre 2018
+for col in required_cols:
+    if col not in ['playerid', 'playername', 'position', 'teamname', 'gameid', 'game', 'league', 'date', 'champion']:
+        df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+
+#Role specific weighting for early/laning phase, factors are therefore set to "at15"
+ROLE_LANE_WEIGHTS = {
+    'top':     {'goldat15': 2.13, 'xpat15': 1.77, 'killsat15': 1.42, 'assistsat15': 0.89, 'deathsat15': -1.20},
+    'jng':     {'goldat15': 1.34, 'xpat15': 1.61, 'killsat15': 1.34, 'assistsat15': 1.61, 'deathsat15': -0.90},
+    'mid':     {'goldat15': 1.65, 'xpat15': 1.65, 'killsat15': 1.50, 'assistsat15': 1.20, 'deathsat15': -1.00},
+    'bot':     {'goldat15': 2.14, 'xpat15': 1.53, 'killsat15': 1.53, 'assistsat15': 0.92, 'deathsat15': -1.10},
+    'sup':     {'goldat15': 1.31, 'xpat15': 1.64, 'killsat15': 0.82, 'assistsat15': 2.29, 'deathsat15': -1.05}
+}
+
+#Role specific weighting for the whole game
+ROLE_GAME_WEIGHTS = {
+    'top':     {'kills': 1.2, 'assists': 0.8, 'vspm': 0.6, 'dpm': 1.0, 'cspm': 1.4, 'earned gpm': 1.0},
+    'jng':     {
+        'kills': 0.8, 'assists': 1.0, 'vspm': 1.0, 'dpm': 0.8, 'cspm': 0.6, 'earned gpm': 1.0,
+        'monsterkillsenemyjungle': 0.4, 'dragons': 0.4, 'barons': 0.4,
+        'heralds': 0.4, 'void_grubs': 0.2, 'firstherald': 0.2, 'firstdragon': 0.2
+    },
+    'mid':     {'kills': 1.2, 'assists': 0.8, 'vspm': 0.6, 'dpm': 1.2, 'cspm': 1.2, 'earned gpm': 1.0},
+    'bot':     {'kills': 1.4, 'assists': 0.6, 'vspm': 0.4, 'dpm': 1.4, 'cspm': 1.2, 'earned gpm': 1.0},
+    'sup':     {'kills': 0.6, 'assists': 1.4, 'vspm': 1.4, 'dpm': 0.6, 'earned gpm': 0.5}
+}
+
+#Standard Elo expectation (team A vs team B)
+def expected_score(team_a_elo, team_b_elo):
+    return 1 / (1 + 10 ** ((team_b_elo - team_a_elo) / 400))
+
+#Pergame Elo update driven by lane/game performance weights
+def update_elo(match_df):
+    from datetime import datetime
+
+    teams = match_df['teamname'].unique()
+    if len(teams) != 2 or match_df.shape[0] < 10:
+        return
+
+ #Full dataframe for objective peeks (if found)
+    full_game_df = match_df
+    team_objectives = full_game_df[~full_game_df['position'].isin(['top', 'jng', 'mid', 'bot', 'sup'])] #Tries to read team objective rows (non player rows), to atribute the Jungler role better (see row 158). This is present for some leagues, while others doesn't provide this data (LPL for example)
+    team_objective_map = {
+        row['teamname']: {
+            'dragons': row.get('dragons', 0),
+            'barons': row.get('barons', 0),
+            'heralds': row.get('heralds', 0),
+            'void_grubs': row.get('void_grubs', 0),
+            'firstdragon': row.get('firstdragon', 0)
+        } for _, row in team_objectives.iterrows()
+    }
+
+    team_data = {}
+    position_map = {} #(team, position) -> player dict (for lane opponent lookup)
+
+    for team in teams:
+        team_df = match_df[match_df['teamname'] == team]
+        players = []
+        total_elo = 0
+
+        for _, row in team_df.iterrows():
+            pid, pos, pname = row['playerid'], row['position'], row['playername']
+            league, champ = row['league'], row['champion']
+            key = (pid, pos)
+            champ_key = (pid, champ)
+
+            #Init unseen entries with BASE_ELO
+            if key not in player_position_elo:
+                player_position_elo[key] = BASE_ELO
+            if champ_key not in player_champion_elo:
+                player_champion_elo[champ_key] = BASE_ELO
+
+            elo = player_position_elo[key]
+
+            #lw = Lane Weighting, done to calculate how a player performed overall in lane/early game
+            lw = ROLE_LANE_WEIGHTS.get(pos, {})
+            lane_score = (
+                row['goldat15'] * lw.get('goldat15', 0) / 1000 +
+                row['xpat15'] * lw.get('xpat15', 0) / 1000 +
+                row['killsat15'] * lw.get('killsat15', 0) +
+                row['assistsat15'] * lw.get('assistsat15', 0) +
+                row['deathsat15'] * lw.get('deathsat15', 0)
+            )
+            lane_score = max(lane_score, 0)
+
+            #gw = Game Weighting, done to calculate how a player performed overall in the game
+            gw = ROLE_GAME_WEIGHTS.get(pos, {})
+            game_score = (
+                row['kills'] * gw.get('kills', 0) +
+                row['assists'] * gw.get('assists', 0) +
+                row['vspm'] * gw.get('vspm', 0) +
+                row['dpm'] * gw.get('dpm', 0) / 100 +
+                row['cspm'] * gw.get('cspm', 0) +
+                row['earned gpm'] * gw.get('earned gpm', 0) / 100 +
+                row.get('monsterkillsenemyjungle', 0) * gw.get('monsterkillsenemyjungle', 0) +
+                row.get('firstherald', 0) * gw.get('firstherald', 0)
+            )
+
+            #Jungler bonus, add team objective credit if we found team rows
+            if pos == 'jng' and team in team_objective_map:
+                team_obj = team_objective_map[team]
+                game_score += sum([
+                    team_obj.get(obj, 0) * gw.get(obj, 0)
+                    for obj in ['dragons', 'barons', 'heralds', 'void_grubs', 'firstdragon']
+                ])
+
+            game_score = max(game_score, 0)
+
+            players.append({
+                'id': pid, 'name': pname, 'elo': elo, 'position': pos, 'league': league, 'champion': champ,
+                'lane_score': lane_score, 'game_score': game_score,
+                'result': int(row['result']), 'gameid': row['gameid'], 'game': row['game'],
+                'team': team, 'date': row['date'],
+                'kills': int(row['kills']), 'assists': int(row['assists']), 'teamkills': int(row['teamkills'])
+            })
+
+            total_elo += elo
+            position_map[(team, pos)] = players[-1]
+
+        team_data[team] = {
+            'players': players,
+            'total_elo': total_elo,
+            'result': players[0]['result'] if players else 0
+        }
+
+    #Team vs team Elo expectation and result
+    team_a, team_b = teams
+    a_data, b_data = team_data[team_a], team_data[team_b]
+    expected = expected_score(a_data['total_elo'], b_data['total_elo'])
+    result_a = a_data['result']
+    result_b = b_data['result']
+
+    #Team delta based on surprise factor (|result - expected|)
+    delta = K * abs(result_a - expected)
+    team_deltas = {
+        team_a: +delta if result_a > result_b else -delta,
+        team_b: -delta if result_a > result_b else +delta
+    }
+
+    #Distributess team delta to players using lane/game performance vs lane opponent
+    for team in [team_a, team_b]:
+        opponent_team = team_b if team == team_a else team_a
+        players = team_data[team]['players']
+        delta = team_deltas[team]
+
+        for p in players:
+            key = (p['id'], p['position'])
+            champ_key = (p['id'], p['champion'])
+
+            #Finds same position opponent
+            opponent = position_map.get((opponent_team, p['position']))
+            opp_lane_score = opponent['lane_score'] if opponent else 0
+            opp_game_score = opponent['game_score'] if opponent else 0
+
+            #Symmetric normalization to [0,1] (0.5 = equal)
+            lane_rating = (p['lane_score'] - opp_lane_score) / (abs(p['lane_score']) + abs(opp_lane_score)) if (abs(p['lane_score']) + abs(opp_lane_score)) > 0 else 0
+            lane_rating = (lane_rating + 1) / 2
+
+            game_rating = (p['game_score'] - opp_game_score) / (abs(p['game_score']) + abs(opp_game_score)) if (abs(p['game_score']) + abs(opp_game_score)) > 0 else 0
+            game_rating = (game_rating + 1) / 2
+
+            #Weight early higher than late
+            final_weight = 0.65 * lane_rating + 0.35 * game_rating
+            adjusted_weight = 1 - final_weight if delta < 0 else final_weight #If team lost, invert so top performers lose less
+            change = delta * adjusted_weight
+
+            #Enforce minimum absolute movement
+            if change > 0:
+                change = max(change, MIN_ELO_CHANGE)
+            else:
+                change = min(change, -MIN_ELO_CHANGE)
+
+            #Update position Elo
+            old_elo = player_position_elo[key]
+            new_elo = max(0, old_elo + change)
+            player_position_elo[key] = new_elo
+
+            #Update champion Elo (might scrap this later on, just a fun thing to try out)
+            old_champ_elo = player_champion_elo[champ_key]
+            new_champ_elo = max(0, old_champ_elo + change)
+            player_champion_elo[champ_key] = new_champ_elo
+
+            #Log row for this player
+            elo_history.append({
+                'date': p['date'], 'league': p['league'],
+                'gameid': p['gameid'], 'game': p['game'],
+                'playerid': p['id'], 'playername': p['name'], 'position': p['position'], 'champion': p['champion'],
+                'team': p['team'], 'opponent_team': opponent_team, 'result': p['result'],
+                'match_outcome': "Win" if p['result'] == 1 else "Loss",
+                'kills': p['kills'], 'assists': p['assists'], 'teamkills': p['teamkills'],
+                'team_old_elo': round(team_data[team]['total_elo'], 2),
+                'old_elo': round(old_elo, 2), 'new_elo': round(new_elo, 2),
+                'old_champion_elo': round(old_champ_elo, 2), 'new_champion_elo': round(new_champ_elo, 2),
+                'elo_change': round(new_elo - old_elo, 2),
+                'lane_rating': round(lane_rating, 4), 'game_rating': round(game_rating, 4),
+                'final_weight': round(final_weight, 4),
+                'lane_score': round(p['lane_score'], 4), 'game_score': round(p['game_score'], 4),
+                'opponent_lane_score': round(opp_lane_score, 4), 'opponent_game_score': round(opp_game_score, 4)
+            })
+
+#Elo Update
+print("Updating ELO")
+game_dates = df.groupby(['gameid', 'game'])['date'].min().reset_index().sort_values(by=['date', 'game'])
+for _, row in tqdm(game_dates.iterrows(), total=len(game_dates)):
+    gid, gnum = row['gameid'], row['game']
+    if (gid, gnum) in processed_games:
+        continue
+    match_df = df[df['gameid'] == gid]
+    update_elo(match_df)
+
+print("Adding gamelength, patch, and GSPM only for new matches...")
+
+#Build DataFrame only from new Elo matches, so the script doesnt need to run trough all the matches each time the script runs
+new_rows_df = pd.DataFrame(elo_history)
+
+if new_rows_df.empty:
+    print("No new matches found, skipping GSPM/gamelength patching.")
+else:
+    #Load current raw data
+    raw_extra = pd.read_csv(RAW_DATA_PATH, usecols=['gameid', 'gamelength', 'patch'], low_memory=False)
+    raw_extra = raw_extra.drop_duplicates(subset=['gameid'])
+
+    #Standardize gameid type
+    new_rows_df['gameid'] = new_rows_df['gameid'].astype(str)
+    raw_extra['gameid'] = raw_extra['gameid'].astype(str)
+
+    #Merge gamelength + patch onto new Elo rows only
+    new_rows_df = new_rows_df.merge(raw_extra, on='gameid', how='left')
+
+    #Compute Game Score Per Minute (GSPM) only on new rows
+    new_rows_df['GSPM'] = new_rows_df.apply(
+        lambda row: row['game_score'] / row['gamelength']
+        if pd.notnull(row['gamelength']) and row['gamelength'] > 0 and row['game_score'] > 0
+        else 0,
+        axis=1
+    )
+
+    #Append new matches info to full log
+    log_df = pd.concat([log_df, new_rows_df], ignore_index=True)
+
+    #Remove any duplicate rows: keep the most recent enriched version
+    log_df.drop_duplicates(subset=['gameid', 'game', 'playerid'], keep='last', inplace=True)
+
+    #Done
+    print("New matches added to Elo log.")
+    print("Sample of patched rows:") #Used early on to test
+    print(new_rows_df[['gameid', 'gamelength', 'patch', 'GSPM']].head())
+
+    log_df.to_csv(ELO_LOG_PATH, index=False)
+
+print("Log with new matches!")
