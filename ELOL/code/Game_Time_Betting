@@ -1,0 +1,263 @@
+import os
+import time
+import pandas as pd
+import numpy as np
+from pandas.errors import EmptyDataError, ParserError
+
+#==============================
+#CONFIG
+#==============================
+CSV_PATH=\ELOL\db\processed\elo_ratings.csv"
+OUTPUT_DIR=\ELOL\Betting"
+BETS_CSV_PATH=os.path.join(OUTPUT_DIR,"bets_log.csv")
+
+ELO_WINDOW=25
+DEFAULT_ELO=1500.0
+
+#Supported thresholds 20:30-38:30, def can be changed next row
+TIME_THRESHOLDS=[(f"{m:02d}:30",m*60+30) for m in range(20,38)]
+LABEL_TO_SEC={lbl:sec for lbl,sec in TIME_THRESHOLDS}
+
+#==============================
+#CORE
+#==============================
+def parse_date_clean(s):
+    d=s.astype(str).str.strip().str.split(" ").str[0]
+    return pd.to_datetime(d,format="%Y-%m-%d",errors="coerce")
+
+def season_from_patch_only(patch):
+    p=patch.astype(str).str.strip()
+    head=p.str.split(".",n=1).str[0]
+    return pd.to_numeric(head,errors="coerce")
+
+def mmss_to_seconds(s):
+    if ":" not in s:
+        raise ValueError("Expected mm:ss format.")
+    mm,ss=s.split(":",1)
+    mm=int(mm); ss=int(ss)
+    if ss<0 or ss>=60 or mm<0:
+        raise ValueError("Invalid mm:ss.")
+    return mm*60+ss
+
+def line_to_threshold_seconds(line_value):
+    if abs(line_value*2-round(line_value*2))>1e-9:
+        raise ValueError("Line must be x.5 format.")
+    mm=int(np.floor(line_value))
+    if abs(line_value-(mm+0.5))>1e-9:
+        raise ValueError("Only half-minute lines supported.")
+    sec=mm*60+30
+    if sec not in LABEL_TO_SEC.values():
+        raise ValueError("Line outside supported range.")
+    return sec
+
+def settle_bet(prefix,line_value,gamelength_sec):
+    threshold=line_to_threshold_seconds(line_value)
+    if gamelength_sec==threshold:
+        return "VOID"
+    if prefix.lower()=="over":
+        return "TRUE" if gamelength_sec>threshold else "FALSE"
+    if prefix.lower()=="under":
+        return "TRUE" if gamelength_sec<threshold else "FALSE"
+    raise ValueError("Unknown prefix")
+
+#==============================
+#BET LOG MANAGEMENT
+#==============================
+def ensure_bets_columns(df):
+    cols=["Date","Match","Game","Prefix","Line","Odds","Stake","Realized","ROI","Bankroll"]
+    for c in cols:
+        if c not in df.columns:
+            df[c]=np.nan
+    df["Realized"]=df["Realized"].astype("object")
+    df["Game"]=pd.to_numeric(df["Game"],errors="coerce")
+    df["Line"]=pd.to_numeric(df["Line"],errors="coerce")
+    df["Odds"]=pd.to_numeric(df["Odds"],errors="coerce")
+    df["Stake"]=pd.to_numeric(df["Stake"],errors="coerce")
+    df["ROI"]=pd.to_numeric(df["ROI"],errors="coerce")
+    df["Bankroll"]=pd.to_numeric(df["Bankroll"],errors="coerce")
+    return df
+
+def load_bets_log():
+    cols=["Date","Match","Game","Prefix","Line","Odds","Stake","Realized","ROI","Bankroll"]
+    if not os.path.exists(BETS_CSV_PATH):
+        return ensure_bets_columns(pd.DataFrame(columns=cols))
+    if os.path.getsize(BETS_CSV_PATH)==0:
+        return ensure_bets_columns(pd.DataFrame(columns=cols))
+    try:
+        df=pd.read_csv(BETS_CSV_PATH)
+        return ensure_bets_columns(df)
+    except (EmptyDataError,ParserError,UnicodeDecodeError):
+        ts=time.strftime("%Y%m%d_%H%M%S")
+        backup=os.path.join(os.path.dirname(BETS_CSV_PATH),f"bets_log_BACKUP_{ts}.csv")
+        os.replace(BETS_CSV_PATH,backup)
+        return ensure_bets_columns(pd.DataFrame(columns=cols))
+
+def save_bets_log(df):
+    os.makedirs(os.path.dirname(BETS_CSV_PATH),exist_ok=True)
+    cols=["Date","Match","Game","Prefix","Line","Odds","Stake","Realized","ROI","Bankroll"]
+    df=ensure_bets_columns(df)
+    df=df[cols].copy()
+    tmp=BETS_CSV_PATH+".tmp"
+    df.to_csv(tmp,index=False)
+    os.replace(tmp,BETS_CSV_PATH)
+
+def recompute_bankroll(df):
+    roi=pd.to_numeric(df["ROI"],errors="coerce").fillna(0.0)
+    df["Bankroll"]=roi.cumsum().round(6)
+    return df
+
+def is_unsolved(series):
+    s=series.astype(str).str.strip().str.lower()
+    return series.isna()|(s=="")|(s=="nan")
+
+#==============================
+#ELO LOGIC
+#==============================
+def latest_projected_team_elo(df_scope,team_name):
+    key=team_name.strip().lower()
+    tdf=df_scope[df_scope["team_lower"]==key].copy()
+    if tdf.empty:
+        return {"team":team_name,"projected_team_elo":DEFAULT_ELO}
+    tdf["game_num"]=pd.to_numeric(tdf["game"],errors="coerce")
+    tdf=tdf.dropna(subset=["date_clean","game_num","gameid"])
+    games=(tdf.groupby("gameid",as_index=False)
+            .agg(date_clean=("date_clean","first"),
+                 game_num=("game_num","max"))
+            .sort_values(["date_clean","game_num"],ascending=[False,False]))
+    latest_id=games.iloc[0]["gameid"]
+    rows=df_scope[(df_scope["team_lower"]==key)&(df_scope["gameid"]==latest_id)]
+    team_old=float(rows["team_old_elo"].iloc[0])
+    delta=float(pd.to_numeric(rows["elo_change"],errors="coerce").fillna(0).sum())
+    return {"team":team_name,"projected_team_elo":team_old+delta}
+
+def build_per_game_hist(df_hist):
+    g=(df_hist.groupby(["gameid","team"],as_index=False)
+       .agg(team_old_elo=("team_old_elo","first"),
+            gamelength=("gamelength","first")))
+    valid=g.groupby("gameid")["team"].nunique()
+    g=g[g["gameid"].isin(valid[valid==2].index)]
+    pg=(g.groupby("gameid",as_index=False)
+        .agg(gamelength=("gamelength","first"),
+             elo_min=("team_old_elo","min"),
+             elo_max=("team_old_elo","max")))
+    pg["elo_diff"]=(pg["elo_max"]-pg["elo_min"]).abs()
+    return pg
+
+#==============================
+#BET MODE
+#==============================
+def run_bet_mode():
+    df=pd.read_csv(CSV_PATH,sep=None,engine="python")
+    df["team"]=df["team"].astype(str).str.strip()
+    df["team_lower"]=df["team"].str.lower()
+    df["league"]=df["league"].astype(str).str.strip()
+    df["team_old_elo"]=pd.to_numeric(df["team_old_elo"],errors="coerce")
+    df["gamelength"]=pd.to_numeric(df["gamelength"],errors="coerce")
+    df["date_clean"]=parse_date_clean(df["date"])
+    df=df.dropna(subset=["date_clean","team_old_elo","gamelength","gameid","team","league"])
+
+    t1=input("Team 1 Name: ").strip()
+    t2=input("Team 2 Name: ").strip()
+    league=input("League: ").strip()
+    season=int(input("Season: ").strip())
+
+    df_league=df[df["league"]==league].copy()
+    e1=latest_projected_team_elo(df_league,t1)
+    e2=latest_projected_team_elo(df_league,t2)
+
+    diff=abs(e1["projected_team_elo"]-e2["projected_team_elo"])
+    low=max(0,diff-ELO_WINDOW); high=diff+ELO_WINDOW
+
+    df_hist=df[df["league"]==league].copy()
+    df_hist["season_patch"]=season_from_patch_only(df_hist["patch"])
+    df_hist=df_hist[df_hist["season_patch"]==season]
+    pg=build_per_game_hist(df_hist)
+    hist=pg[(pg["elo_diff"]>=low)&(pg["elo_diff"]<=high)]
+
+    model_probs={lbl:float((hist["gamelength"]>=sec).mean()) for lbl,sec in TIME_THRESHOLDS}
+
+    for lbl,p in model_probs.items():
+        print(lbl,round(p*100,2))
+
+    start=float(input("Line: "))
+    entries=[]
+    current=start
+    while True:
+        try:
+            sec=line_to_threshold_seconds(current)
+            lbl=f"{int(current-0.5):02d}:30"
+        except:
+            break
+        o=input(f"Odds Over {current}: ")
+        if o.lower()=="done":
+            break
+        u=input(f"Odds Under {current}: ")
+        entries.append((current,lbl,float(o),float(u)))
+        current+=1.0
+
+    bo=int(input("Best of X: "))
+    date=input("Date (YYYY-MM-DD): ")
+
+    match=f"{t1} vs {t2}"
+    rows=[]
+    for g in range(1,bo+1):
+        for line,lbl,odds_o,odds_u in entries:
+            p=model_probs[lbl]
+            if p-(1/odds_o)>0:
+                rows.append({"Date":date,"Match":match,"Game":g,"Prefix":"Over","Line":line,"Odds":odds_o,"Stake":p-(1/odds_o)})
+            if (1-p)-(1/odds_u)>0:
+                rows.append({"Date":date,"Match":match,"Game":g,"Prefix":"Under","Line":line,"Odds":odds_u,"Stake":(1-p)-(1/odds_u)})
+
+    dfb=load_bets_log()
+    dfb=pd.concat([dfb,pd.DataFrame(rows)],ignore_index=True)
+    dfb=recompute_bankroll(dfb)
+    save_bets_log(dfb)
+
+#==============================
+#SOLVE MODE
+#==============================
+def run_solve_mode():
+    dfb=load_bets_log()
+    while True:
+        unsolved_mask=is_unsolved(dfb["Realized"])
+        if not unsolved_mask.any():
+            break
+        idx=dfb.index[unsolved_mask][0]
+        date,match,game=dfb.loc[idx,["Date","Match","Game"]]
+        ans=input(f"Game Length [{match}] Game [{int(game)}]? ")
+        if ans.upper()=="VOID":
+            mask=(dfb["Match"]==match)&(dfb["Game"]>=game)&is_unsolved(dfb["Realized"])
+            dfb.loc[mask,"Realized"]="VOID"
+            dfb.loc[mask,"ROI"]=0.0
+            continue
+        gl=mmss_to_seconds(ans)
+        mask=(dfb["Match"]==match)&(dfb["Game"]==game)&is_unsolved(dfb["Realized"])
+        for i in dfb.index[mask]:
+            res=settle_bet(dfb.at[i,"Prefix"],dfb.at[i,"Line"],gl)
+            dfb.at[i,"Realized"]=res
+            if res=="TRUE":
+                dfb.at[i,"ROI"]=dfb.at[i,"Stake"]*(dfb.at[i,"Odds"]-1)
+            elif res=="FALSE":
+                dfb.at[i,"ROI"]=-dfb.at[i,"Stake"]
+            else:
+                dfb.at[i,"ROI"]=0.0
+    dfb=recompute_bankroll(dfb)
+    save_bets_log(dfb)
+
+#==============================
+#MAIN ENTRY
+#==============================
+def main():
+    os.makedirs(OUTPUT_DIR,exist_ok=True)
+    dfb=load_bets_log()
+    last=pd.to_numeric(dfb["Bankroll"],errors="coerce").dropna()
+    pl=float(last.iloc[-1]) if len(last) else 0.0
+    print("Current P/L:",round(pl,6))
+    mode=input("Bet or Solve: ").lower()
+    if mode=="bet":
+        run_bet_mode()
+    elif mode=="solve":
+        run_solve_mode()
+
+if __name__=="__main__":
+    main()
